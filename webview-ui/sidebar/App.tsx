@@ -11,7 +11,7 @@ import * as React from "react";
 import { Icon } from "../shared/icons";
 import { renderMarkdown } from "../shared/markdown";
 import { vscode } from "../shared/vscode";
-import { Composer, KIND_SVG, applyFileIconTo } from "./components/Composer";
+import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
 import { ToolCard, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
 import { History } from "./components/History";
 import type { AgentEvent, ApprovalMode, ApprovalRequestInfo, AssistantBlock, AssistantTurn, Attachment, ConversationSummary, ErrorBlock, InMessage, MentionItem, Mode, ModelDef, ModelOption, OutMessage, PendingChangeInfo, PersonaInfo, TeamInfo, ThinkingBlock, ToolBlock, Turn, UserTurn } from "./types";
@@ -659,6 +659,27 @@ export function App() {
   const [conversations, setConversations] = React.useState<ConversationSummary[]>([]);
   const [activeId, setActiveId] = React.useState<string | undefined>(undefined);
   const [openTabs, setOpenTabs] = React.useState<string[]>([]); // IDs of tabs visible in tab bar
+  // Per-tab composer drafts. Key "" = brand-new chat (no backend id yet).
+  const draftsRef = React.useRef<Map<string, ComposerDraft>>(new Map());
+  const [, setDraftTick] = React.useReducer((n: number) => n + 1, 0);
+  const hasDraft = (id: string) => {
+    const d = draftsRef.current.get(id);
+    return !!(d && (d.text.trim() || d.attachments.length));
+  };
+  const setTabDraft = React.useCallback((id: string, d: ComposerDraft) => {
+    const empty = !d.text.trim() && d.attachments.length === 0;
+    if (empty) draftsRef.current.delete(id);
+    else draftsRef.current.set(id, d);
+    // Keep a New Chat tab pinned while its composer has content.
+    if (id === "") {
+      setOpenTabs((t) => {
+        if (!empty && !t.includes("")) return [...t, ""];
+        if (empty && t.includes("") && activeIdRef.current) return t.filter((x) => x !== "");
+        return t;
+      });
+      setDraftTick();
+    }
+  }, []);
   const [historyOpen, setHistoryOpen] = React.useState(false);
   const [moreOpen, setMoreOpen] = React.useState(false);
   const moreRef = React.useRef<HTMLDivElement>(null);
@@ -707,7 +728,8 @@ export function App() {
     setOpenTabs((tabs) => {
       const keep = [...tabs];
       while (keep.length > max) {
-        const idx = keep.findIndex((id) => id !== activeIdRef.current);
+        // Prefer dropping real chats over a New Chat tab that still has typed text.
+        const idx = keep.findIndex((id) => id !== activeIdRef.current && !(id === "" && hasDraft("")));
         if (idx === -1) break;
         keep.splice(idx, 1);
       }
@@ -1018,7 +1040,7 @@ export function App() {
         case "conversations":
           setConversations(msg.list || []);
           { const ids = new Set((msg.list || []).map((c: ConversationSummary) => c.id));
-            setOpenTabs((t) => t.filter((id) => ids.has(id)));
+            setOpenTabs((t) => t.filter((id) => id === "" || ids.has(id)));
             // Keep the "" pending session (brand-new chat awaiting its id).
             for (const k of [...sessionsRef.current.keys()]) if (k !== "" && !ids.has(k)) sessionsRef.current.delete(k);
           }
@@ -1031,7 +1053,15 @@ export function App() {
           setActiveId(msg.activeId);
           setHistoryOpen(false);
           if (msg.personaId) setPersonaId(msg.personaId);
-          if (msg.activeId) setOpenTabs((t) => t.includes(msg.activeId!) ? t : [...t, msg.activeId!]);
+          setOpenTabs((t) => {
+            let next = t;
+            if (msg.activeId && !next.includes(msg.activeId)) next = [...next, msg.activeId];
+            // Brand-new chat (no id yet): show a New Chat tab.
+            if (!msg.activeId && !next.includes("")) next = [...next, ""];
+            // Drop empty New Chat tab when leaving it for a real conversation (draft keeps it).
+            if (msg.activeId && next.includes("") && !hasDraft("")) next = next.filter((id) => id !== "");
+            return next;
+          });
           force();
           break;
         case "runStarted": {
@@ -1039,9 +1069,14 @@ export function App() {
           if (!activeIdRef.current) {
             const pending = sessionsRef.current.get("") ;
             if (pending) { sessionsRef.current.set(msg.convId, pending); sessionsRef.current.delete(""); }
+            const d = draftsRef.current.get("");
+            if (d) { draftsRef.current.set(msg.convId, d); draftsRef.current.delete(""); }
             activeIdRef.current = msg.convId;
             setActiveId(msg.convId);
-            setOpenTabs((t) => t.includes(msg.convId) ? t : [...t, msg.convId]);
+            setOpenTabs((t) => {
+              const next = t.filter((id) => id !== "");
+              return next.includes(msg.convId) ? next : [...next, msg.convId];
+            });
           }
           const s = sessionFor(msg.convId);
           s.running = true;
@@ -1329,14 +1364,17 @@ export function App() {
   }, [subTab, subBlock]);
 
   const closeTab = (id: string) => {
+    draftsRef.current.delete(id);
     setOpenTabs((tabs) => {
       const next = tabs.filter((t) => t !== id);
       // If we closed the active tab, switch to another or start fresh
-      if (id === activeId) {
+      const wasActive = id === activeId || (id === "" && !activeId);
+      if (wasActive) {
         const idx = tabs.indexOf(id);
         const fallback = next[Math.min(idx, next.length - 1)];
-        if (fallback) {
-          post({ type: "selectConversation", id: fallback });
+        if (fallback !== undefined) {
+          if (fallback === "") post({ type: "newConversation" });
+          else post({ type: "selectConversation", id: fallback });
         } else {
           // No tabs left → new conversation
           post({ type: "newConversation" });
@@ -1358,15 +1396,20 @@ export function App() {
           }}
         >
           {openTabs.map((tabId) => {
-            const c = conversations.find((x) => x.id === tabId);
+            const c = tabId ? conversations.find((x) => x.id === tabId) : undefined;
             const title = c ? c.title : "New Chat";
+            const isActive = tabId === "" ? !activeId && !subTab : tabId === activeId && !subTab;
             return (
               <div
-                key={tabId}
-                className={"tab" + (tabId === activeId && !subTab ? " active" : "")}
+                key={tabId || "new"}
+                className={"tab" + (isActive ? " active" : "")}
                 onClick={() => {
                   if (subTab) setSubTab(null);
-                  if (tabId !== activeId) post({ type: "selectConversation", id: tabId });
+                  if (tabId === "") {
+                    if (activeId) post({ type: "newConversation" });
+                  } else if (tabId !== activeId) {
+                    post({ type: "selectConversation", id: tabId });
+                  }
                 }}
                 onMouseDown={(e) => {
                   // middle-click closes tab (not delete)
@@ -1390,8 +1433,8 @@ export function App() {
               </div>
             );
           })}
-          {/* Show a "New Chat" tab when no tabs are open or activeId has no tab */}
-          {(!activeId || !openTabs.includes(activeId)) && (
+          {/* Fallback New Chat tab when nothing is open and no draft tab exists */}
+          {openTabs.length === 0 && !activeId && (
             <div className={"tab" + (!subTab ? " active" : "")}>
               <span className="tab-title">New Chat</span>
             </div>
@@ -1434,7 +1477,7 @@ export function App() {
                 </button>
                 <button
                   disabled={openTabs.length === 0}
-                  onClick={() => { setMoreOpen(false); setOpenTabs([]); post({ type: "newConversation" }); }}
+                  onClick={() => { setMoreOpen(false); draftsRef.current.clear(); setOpenTabs([]); post({ type: "newConversation" }); }}
                 >
                   <Icon name="close" size={13} /> Close All Tabs
                 </button>
@@ -1754,7 +1797,13 @@ export function App() {
           queuedCount={queued.length}
           onRunNextQueued={() => runQueuedNow(0)}
           draft={draft}
-          onSubmit={(text, attachments) => { setDraft(null); onSubmit(text, attachments); }}
+          tabDraft={draftsRef.current.get(activeId ?? "") ?? null}
+          onTabDraft={(d) => setTabDraft(activeId ?? "", d)}
+          onSubmit={(text, attachments) => {
+            setDraft(null);
+            draftsRef.current.delete(activeId ?? "");
+            onSubmit(text, attachments);
+          }}
           onCancel={() => post({ type: "cancelRun", convId: activeId })}
           submitWithCtrlEnter={uiPrefs.submitWithCtrlEnter}
         />
