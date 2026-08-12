@@ -907,7 +907,22 @@ export function App() {
     if (prevActiveIdRef.current !== activeId) {
       prevActiveIdRef.current = activeId;
       pinTopRef.current = false;
+      userScrolledRef.current = false;
       setStick(true);
+      // Content of a long transcript keeps growing after this pass (markdown,
+      // code blocks, tool cards laying out), so a single scrollTop here lands
+      // mid-chat. Re-snap for a few frames until the height settles.
+      // ponytail: frame-count heuristic; swap for a ResizeObserver if it drifts.
+      let n = 12;
+      const snap = () => {
+        const c = scrollRef.current;
+        if (!c || !stickRef.current) return;
+        selfScrollRef.current = true;
+        c.scrollTop = c.scrollHeight;
+        selfScrollRef.current = false;
+        if (n-- > 0) requestAnimationFrame(snap);
+      };
+      requestAnimationFrame(snap);
     }
     sizeSpacer();
     if (pinTopRef.current) {
