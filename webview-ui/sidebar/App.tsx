@@ -666,6 +666,9 @@ export function App() {
     const d = draftsRef.current.get(id);
     return !!(d && (d.text.trim() || d.attachments.length));
   };
+  // Shared-draft key: one composer draft follows the user across tabs unless
+  // the Per-Tab Composer Drafts setting is on.
+  const SHARED_DRAFT = "\u0000shared";
   const setTabDraft = React.useCallback((id: string, d: ComposerDraft) => {
     const empty = !d.text.trim() && d.attachments.length === 0;
     if (empty) draftsRef.current.delete(id);
@@ -696,9 +699,10 @@ export function App() {
   const [hasProviders, setHasProviders] = React.useState(true);
   const [teams, setTeams] = React.useState<TeamInfo[]>([]);
   const [activeTeamIds, setActiveTeamIds] = React.useState<string[]>([]);
-  const [uiPrefs, setUiPrefs] = React.useState<{ chatTextSize: string; submitWithCtrlEnter: boolean; maxTabCount: number; completionSound: boolean }>({ chatTextSize: "default", submitWithCtrlEnter: false, maxTabCount: 0, completionSound: false });
+  const [uiPrefs, setUiPrefs] = React.useState<{ chatTextSize: string; submitWithCtrlEnter: boolean; maxTabCount: number; completionSound: boolean; perTabDrafts: boolean }>({ chatTextSize: "default", submitWithCtrlEnter: false, maxTabCount: 0, completionSound: false, perTabDrafts: false });
   const uiPrefsRef = React.useRef(uiPrefs);
   React.useEffect(() => { uiPrefsRef.current = uiPrefs; }, [uiPrefs]);
+  const draftKey = uiPrefs.perTabDrafts ? (activeId ?? "") : SHARED_DRAFT;
   const [pendingChanges, setPendingChanges] = React.useState<PendingChangeInfo[]>([]);
   // Pending in-chat approval requests, keyed by conversation id.
   const [approvals, setApprovals] = React.useState<Record<string, ApprovalRequestInfo[]>>({});
@@ -1379,7 +1383,7 @@ export function App() {
   }, [subTab, subBlock]);
 
   const closeTab = (id: string) => {
-    draftsRef.current.delete(id);
+    if (uiPrefsRef.current.perTabDrafts) draftsRef.current.delete(id);
     setOpenTabs((tabs) => {
       const next = tabs.filter((t) => t !== id);
       // If we closed the active tab, switch to another or start fresh
@@ -1812,11 +1816,11 @@ export function App() {
           queuedCount={queued.length}
           onRunNextQueued={() => runQueuedNow(0)}
           draft={draft}
-          tabDraft={draftsRef.current.get(activeId ?? "") ?? null}
-          onTabDraft={(d) => setTabDraft(activeId ?? "", d)}
+          tabDraft={draftsRef.current.get(draftKey) ?? null}
+          onTabDraft={(d) => setTabDraft(draftKey, d)}
           onSubmit={(text, attachments) => {
             setDraft(null);
-            draftsRef.current.delete(activeId ?? "");
+            draftsRef.current.delete(draftKey);
             onSubmit(text, attachments);
           }}
           onCancel={() => post({ type: "cancelRun", convId: activeId })}
