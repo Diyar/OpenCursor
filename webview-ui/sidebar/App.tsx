@@ -913,9 +913,14 @@ export function App() {
       pinTopRef.current = false;
       userScrolledRef.current = false;
       setStick(true);
-      // Content of a long transcript keeps growing after this pass (markdown,
-      // code blocks, tool cards laying out), so a single scrollTop here lands
-      // mid-chat. Re-snap for a few frames until the height settles.
+      // Synchronous snap in the layout effect = the first painted frame is
+      // already at the end (no visible travel from the top).
+      selfScrollRef.current = true;
+      sizeSpacer();
+      el.scrollTop = el.scrollHeight;
+      selfScrollRef.current = false;
+      // A long transcript keeps growing after this pass (markdown, code blocks,
+      // tool cards laying out), so re-snap for a few frames until it settles.
       // ponytail: frame-count heuristic; swap for a ResizeObserver if it drifts.
       let n = 12;
       const snap = () => {
